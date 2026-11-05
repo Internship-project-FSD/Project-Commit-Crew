@@ -1,5 +1,28 @@
+<<<<<<< HEAD
 node_modules
 dist
 .env
 .env.local
 .DS_Store
+=======
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Downloaded CSV files
+downloads/incoming/*
+downloads/processed/*
+downloads/failed/*
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+>>>>>>> upstream/main
