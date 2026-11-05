@@ -19,7 +19,7 @@ async function getReportData(req, res, next) {
     if (config.rows.length === 0) return res.status(404).json({ error: 'Report not found' });
 
     const data = await query(
-      `SELECT * FROM ${reportName} ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+      `SELECT * FROM ${config.rows[0].report_name} ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
       [limit, offset]
     );
     res.json({ report: config.rows[0], data: data.rows });
