@@ -8,8 +8,13 @@ node_modules/
 
 # Downloaded CSV files
 downloads/incoming/*
+!downloads/incoming/.gitkeep
+
 downloads/processed/*
+!downloads/processed/.gitkeep
+
 downloads/failed/*
+!downloads/failed/.gitkeep
 
 # Logs
 *.log
@@ -18,3 +23,10 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+temp-*.txt
+
+# Build outputs
+dist/
+.dist/
+build/
+coverage/
