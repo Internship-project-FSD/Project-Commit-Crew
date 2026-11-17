@@ -10,8 +10,35 @@ import * as logger from './logService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// Resolve the incoming folder configured for each report
+// Resolve the incoming folder configured for each report
+function getIncomingDir(downloadFolder) {
+  const downloadsRoot = path.resolve(
+    __dirname,
+    '../../../../downloads'
+  );
 
-const INCOMING_DIR = path.join(__dirname, '../../../../downloads/incoming');
+  // Support both "downloads/incoming" and "incoming"
+  const relativeFolder = downloadFolder.replace(
+    /^downloads[\\/]/,
+    ''
+  );
+
+  const incomingDir = path.resolve(
+    downloadsRoot,
+    relativeFolder
+  );
+
+  // Prevent configured paths from escaping the downloads directory
+  if (
+    incomingDir === downloadsRoot ||
+    !incomingDir.startsWith(downloadsRoot + path.sep)
+  ) {
+    throw new Error('Invalid download folder path');
+  }
+
+  return incomingDir;
+}
 const PROCESSED_DIR = path.join(__dirname, '../../../../downloads/processed');
 const FAILED_DIR = path.join(__dirname, '../../../../downloads/failed');
 
@@ -202,15 +229,25 @@ if (selectedConfigs.length === 0) {
   // go through each report type
   for (const config of selectedConfigs) {
 
-    // find csv files in incoming folder that match this report type
-    const csvFiles = fs.readdirSync(INCOMING_DIR).filter(f =>
-      f.startsWith(config.report_name) && f.endsWith('.csv')
-    );
+    // Get the incoming folder configured for this report
+const incomingDir = getIncomingDir(
+  config.download_folder || 'downloads/incoming'
+);
+
+// Create the folder if it does not exist
+if (!fs.existsSync(incomingDir)) {
+  fs.mkdirSync(incomingDir, { recursive: true });
+}
+
+// Find CSV files matching this report type
+const csvFiles = fs.readdirSync(incomingDir).filter(f =>
+  f.startsWith(config.report_name) && f.endsWith('.csv')
+);
 
     // process each file
     for (const file of csvFiles) {
       stats.totalFiles++;
-      const filePath = path.join(INCOMING_DIR, file);
+      const filePath = path.join(incomingDir, file);
       const result = await processFile(run.id, filePath, config);
 
         if (result.status === 'success') {

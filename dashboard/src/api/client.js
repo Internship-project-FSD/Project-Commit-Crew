@@ -34,7 +34,16 @@ export const api = {
     if (isDemoMode) return demoApi.getRuns(params);
     return (await http.get(API_PATHS.runs, { params })).data;
   },
+  async updateReport(id, payload) {
+    if (isDemoMode) return demoApi.updateReport(id, payload);
 
+    return (
+      await http.put(
+        `${API_PATHS.reports}/${encodeURIComponent(id)}`,
+        payload
+      )
+    ).data;
+  },
   async startRun(payload) {
     if (isDemoMode) return demoApi.startRun(payload);
 

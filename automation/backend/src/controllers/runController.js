@@ -24,7 +24,16 @@ async function startRun(req, res, next) {
   try {
     console.log('DEBUG: startRun controller reached');
     const { startDate, endDate } = req.body.dateRange || {};
-    const reportId = req.body.reportId || 'all';
+    const reportIdMap = {
+  '1': 'vehicle-sales-purchases',
+  '2': 'service-transactions',
+  '3': 'spare-parts-sales-purchases',
+  '4': 'insurance-renewals'
+};
+
+const requestedReportId = String(req.body.reportId || 'all');
+
+const reportId = reportIdMap[requestedReportId] || requestedReportId;
 
     // Validate the selected dates
     const isValidDate = (value) => {
@@ -48,7 +57,16 @@ async function startRun(req, res, next) {
         error: 'Start date cannot be after end date.'
       });
     }
+// Prevent dates later than today (India Standard Time)
+const today = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata'
+}).format(new Date());
 
+if (startDate > today || endDate > today) {
+  return res.status(400).json({
+    error: 'Future dates are not allowed. Select today or an earlier date.'
+  });
+}
     // 1. Launch Playwright and download the selected reports
     console.log('\nStarting Playwright automation...');
 

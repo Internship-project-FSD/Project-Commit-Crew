@@ -34,7 +34,8 @@ const REPORTS = [
 async function runAllReports(
   startDate = '2026-01-01',
   endDate = '2026-01-10',
-  reportId = 'all'
+  reportId = 'all',
+  authMode = 'manual'
 ) {  if (startDate > endDate) {
     throw new Error('Start date cannot be after end date.');
   }
@@ -46,11 +47,24 @@ async function runAllReports(
   if (selectedReports.length === 0) {
     throw new Error(`Invalid report ID: ${reportId}`);
   }
-  if (!process.env.DMS_URL ||
-      !process.env.DMS_USERNAME ||
-      !process.env.DMS_PASSWORD) {
-    throw new Error('Missing Mock DMS configuration in .env');
-  }
+  if (
+  !process.env.DMS_URL ||
+  !process.env.DMS_USERNAME ||
+  !process.env.DMS_PASSWORD
+    ) {
+      throw new Error('Missing Mock DMS configuration in .env');
+    }
+
+    if (
+      authMode === 'scheduled' &&
+      (!process.env.DMS_API_URL || !process.env.AUTOMATION_SECRET)
+    ) {
+      throw new Error('Missing scheduled automation configuration.');
+    }
+
+    if (!['manual', 'scheduled'].includes(authMode)) {
+      throw new Error(`Invalid authentication mode: ${authMode}`);
+    }
 
   fs.mkdirSync(INCOMING_DIR, { recursive: true });
 
@@ -67,21 +81,54 @@ async function runAllReports(
 
     const page = await context.newPage();
 
-    // 1. Open Mock DMS
-    console.log('\nOpening Mock DMS...');
-    await page.goto(process.env.DMS_URL);
+    // 1. Authentication
+      if (authMode === 'scheduled') {
+        console.log('\nUsing scheduled automation authentication...');
 
-    // 2. Login
-    await page.locator('#username').fill(process.env.DMS_USERNAME);
-    await page.locator('#password').fill(process.env.DMS_PASSWORD);
-    await page.getByTestId('auth-submit').click();
+        const response = await context.request.post(
+          `${process.env.DMS_API_URL}/api/auth/automation-login`,
+          {
+            data: {
+              username: process.env.DMS_USERNAME,
+              password: process.env.DMS_PASSWORD
+            },
+            headers: {
+              'x-automation-secret': process.env.AUTOMATION_SECRET
+            }
+          }
+        );
 
-  // Wait until the first selected report is available
-  await page.getByTestId(
-    `report-link-${selectedReports[0].id}`
-  ).waitFor({ timeout: 15000 });
+        if (!response.ok()) {
+          const errorBody = await response.text();
+          throw new Error(
+            `Scheduled login failed (${response.status()}): ${errorBody}`
+          );
+        }
 
-    console.log('Login successful!');
+        console.log('Scheduled authentication successful!');
+        await page.goto(process.env.DMS_URL);
+
+      } else {
+        console.log('\nOpening Mock DMS...');
+        await page.goto(process.env.DMS_URL);
+
+        console.log('Please complete the email OTP in the browser.');
+
+        await page.locator('#username').fill(process.env.DMS_USERNAME);
+        await page.locator('#password').fill(process.env.DMS_PASSWORD);
+        await page.getByTestId('auth-submit').click();
+      }
+
+      // Wait for access to the reports.
+      const loginTimeout = authMode === 'manual'
+        ? 5 * 60 * 1000
+        : 15000;
+
+      await page.getByTestId(
+        `report-link-${selectedReports[0].id}`
+      ).waitFor({ timeout: loginTimeout });
+
+      console.log('Login successful!');
 
     // 3. Process each report
     for (const report of selectedReports) {
@@ -137,12 +184,13 @@ async function runAllReports(
     await browser.close();
   }
 }
-const [startDate, endDate, reportId = 'all'] = process.argv.slice(2);
+const [startDate, endDate, reportId = 'all', authMode = 'manual'] = process.argv.slice(2);
 
 runAllReports(
   startDate || '2026-01-01',
   endDate || '2026-01-10',
-  reportId
+  reportId,
+  authMode
 ).catch(error => {
   console.error('\nAutomation failed:', error.message);
   process.exitCode = 1;

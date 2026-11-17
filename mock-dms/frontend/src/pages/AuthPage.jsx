@@ -9,6 +9,10 @@ export default function AuthPage({ onAuthenticated }) {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
+  const [otpStep, setOtpStep] = useState(false);
+  const [otp, setOtp] = useState('');
+  const [resendMessage, setResendMessage] = useState('');
+
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -16,6 +20,9 @@ export default function AuthPage({ onAuthenticated }) {
 
   function switchMode(nextMode) {
     setMode(nextMode);
+    setOtpStep(false);
+    setOtp('');
+    setResendMessage('');
     setError('');
     setPassword('');
     setConfirmPassword('');
@@ -24,6 +31,12 @@ export default function AuthPage({ onAuthenticated }) {
   async function handleSubmit(event) {
     event.preventDefault();
     setError('');
+    setResendMessage('');
+
+    if (otpStep && !/^\d{6}$/.test(otp)) {
+      setError('Please enter a valid six-digit OTP.');
+      return;
+    }
 
     if (isSignup && password !== confirmPassword) {
       setError('Your passwords do not match.');
@@ -33,6 +46,19 @@ export default function AuthPage({ onAuthenticated }) {
     setBusy(true);
 
     try {
+      // Step 1: Verify the OTP.
+      if (otpStep) {
+        const data = await apiRequest('/auth/verify-otp', {
+          method: 'POST',
+          body: JSON.stringify({ otp })
+        });
+
+        setOtp('');
+        onAuthenticated(data.user);
+        return;
+      }
+
+      // Step 2: Handle signup or password-based login.
       const endpoint = isSignup
         ? '/auth/signup'
         : '/auth/login';
@@ -56,7 +82,32 @@ export default function AuthPage({ onAuthenticated }) {
       setPassword('');
       setConfirmPassword('');
 
-      onAuthenticated(data.user);
+      if (isSignup) {
+        // Signup still authenticates immediately.
+        onAuthenticated(data.user);
+      } else {
+        // Login requires OTP verification before authentication.
+        setOtpStep(true);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    setError('');
+    setResendMessage('');
+    setBusy(true);
+
+    try {
+      const data = await apiRequest('/auth/resend-otp', {
+        method: 'POST'
+      });
+
+      setResendMessage(data.message || 'A new OTP has been sent.');
+      setOtp('');
     } catch (err) {
       setError(err.message);
     } finally {
@@ -74,13 +125,19 @@ export default function AuthPage({ onAuthenticated }) {
         </p>
 
         <h1>
-          {isSignup ? 'Create your account' : 'Welcome back'}
+          {otpStep
+            ? 'Verify your email'
+            : isSignup
+              ? 'Create your account'
+              : 'Welcome back'}
         </h1>
 
         <p className="auth-subtitle">
-          {isSignup
-            ? 'Register to access the dealership reporting portal.'
-            : 'Sign in to access your dealership reports.'}
+          {otpStep
+            ? 'We sent a six-digit verification code to your registered email address.'
+            : isSignup
+              ? 'Register to access the dealership reporting portal.'
+              : 'Sign in to access your dealership reports.'}
         </p>
 
         {error && (
@@ -89,80 +146,112 @@ export default function AuthPage({ onAuthenticated }) {
           </div>
         )}
 
+        {resendMessage && (
+          <div className="alert success" role="status">
+            {resendMessage}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="auth-form">
-          <label htmlFor="username">
-            {isSignup ? 'Username' : 'Username or email'}
-          </label>
-
-          <input
-            id="username"
-            data-testid="username"
-            type="text"
-            autoComplete="username"
-            placeholder={
-              isSignup
-                ? 'Choose a username'
-                : 'Enter your username or email'
-            }
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            required
-            minLength={isSignup ? 3 : undefined}
-            maxLength={isSignup ? 40 : 254}
-          />
-
-          {isSignup && (
+          {!otpStep && (
             <>
-              <label htmlFor="email">Email address</label>
+              <label htmlFor="username">
+                {isSignup ? 'Username' : 'Username or email'}
+              </label>
 
               <input
-                id="email"
-                data-testid="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                id="username"
+                data-testid="username"
+                type="text"
+                autoComplete="username"
+                placeholder={
+                  isSignup
+                    ? 'Choose a username'
+                    : 'Enter your username or email'
+                }
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
                 required
-                maxLength={254}
+                minLength={isSignup ? 3 : undefined}
+                maxLength={isSignup ? 40 : 254}
               />
+
+              {isSignup && (
+                <>
+                  <label htmlFor="email">Email address</label>
+
+                  <input
+                    id="email"
+                    data-testid="email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    required
+                    maxLength={254}
+                  />
+                </>
+              )}
+
+              <label htmlFor="password">Password</label>
+
+              <input
+                id="password"
+                data-testid="password"
+                type="password"
+                autoComplete={isSignup ? 'new-password' : 'current-password'}
+                placeholder={
+                  isSignup ? 'At least 8 characters' : 'Enter your password'
+                }
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+                minLength={isSignup ? 8 : undefined}
+                maxLength={128}
+              />
+
+              {isSignup && (
+                <>
+                  <label htmlFor="confirm-password">Confirm password</label>
+
+                  <input
+                    id="confirm-password"
+                    data-testid="confirm-password"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="Enter your password again"
+                    value={confirmPassword}
+                    onChange={(event) =>
+                      setConfirmPassword(event.target.value)
+                    }
+                    required
+                    minLength={8}
+                    maxLength={128}
+                  />
+                </>
+              )}
             </>
           )}
 
-          <label htmlFor="password">Password</label>
-
-          <input
-            id="password"
-            data-testid="password"
-            type="password"
-            autoComplete={isSignup ? 'new-password' : 'current-password'}
-            placeholder={
-              isSignup ? 'At least 8 characters' : 'Enter your password'
-            }
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-            minLength={isSignup ? 8 : undefined}
-            maxLength={128}
-          />
-
-          {isSignup && (
+          {otpStep && (
             <>
-              <label htmlFor="confirm-password">Confirm password</label>
+              <label htmlFor="otp">Six-digit OTP</label>
 
               <input
-                id="confirm-password"
-                data-testid="confirm-password"
-                type="password"
-                autoComplete="new-password"
-                placeholder="Enter your password again"
-                value={confirmPassword}
+                id="otp"
+                data-testid="otp"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="Enter your OTP"
+                value={otp}
                 onChange={(event) =>
-                  setConfirmPassword(event.target.value)
+                  setOtp(event.target.value.replace(/\D/g, '').slice(0, 6))
                 }
                 required
-                minLength={8}
-                maxLength={128}
+                maxLength={6}
+                autoFocus
               />
             </>
           )}
@@ -175,37 +264,66 @@ export default function AuthPage({ onAuthenticated }) {
           >
             {busy
               ? 'Please wait...'
-              : isSignup
-                ? 'Create account'
-                : 'Sign in'}
+              : otpStep
+                ? 'Verify OTP'
+                : isSignup
+                  ? 'Create account'
+                  : 'Sign in'}
           </button>
         </form>
 
-        <div className="auth-switch">
-          {isSignup ? (
-            <>
-              Already registered?{' '}
+        {otpStep && (
+          <div className="auth-switch">
+            Didn't receive the code?{' '}
+            <button
+              type="button"
+              className="text-button"
+              onClick={handleResendOtp}
+              disabled={busy}
+            >
+              Resend OTP
+            </button>
+
+            <p>
               <button
                 type="button"
                 className="text-button"
                 onClick={() => switchMode('login')}
+                disabled={busy}
               >
-                Sign in
+                Back to login
               </button>
-            </>
-          ) : (
-            <>
-              Don't have an account?{' '}
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => switchMode('signup')}
-              >
-                Sign up
-              </button>
-            </>
-          )}
-        </div>
+            </p>
+          </div>
+        )}
+
+        {!otpStep && (
+          <div className="auth-switch">
+            {isSignup ? (
+              <>
+                Already registered?{' '}
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => switchMode('login')}
+                >
+                  Sign in
+                </button>
+              </>
+            ) : (
+              <>
+                Don't have an account?{' '}
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => switchMode('signup')}
+                >
+                  Sign up
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         <p className="security-note">
           Accounts are stored in PostgreSQL. Passwords are hashed before storage.

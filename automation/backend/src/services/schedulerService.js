@@ -24,6 +24,8 @@ const PLAYWRIGHT_SCRIPT = path.join(
 const TIMEZONE = 'Asia/Kolkata';
 // Prevent overlapping scheduled batches
 let isSchedulerRunning = false;
+// Stores registered cron jobs so they can be refreshed
+const scheduledJobs = [];
 
 // Converts database report names into the IDs expected by Playwright
 const REPORT_ID_MAP = {
@@ -33,8 +35,8 @@ const REPORT_ID_MAP = {
   insurance_renewals: 'insurance-renewals'
 };
 
-// Returns yesterday's date according to Indian Standard Time
-function getYesterdayDate() {
+// Calculates the report date range using the saved date strategy
+function getDateRange(dateStrategy) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: TIMEZONE,
     year: 'numeric',
@@ -48,22 +50,59 @@ function getYesterdayDate() {
     dateParts[part.type] = part.value;
   }
 
-  const today = new Date(Date.UTC(
+  // Get today's date in Indian Standard Time
+  const endDate = new Date(Date.UTC(
     Number(dateParts.year),
     Number(dateParts.month) - 1,
     Number(dateParts.day)
   ));
 
-  today.setUTCDate(today.getUTCDate() - 1);
+  // Reports end yesterday, not today
+  endDate.setUTCDate(endDate.getUTCDate() - 1);
 
-  return today.toISOString().slice(0, 10);
+  let numberOfDays;
+
+  switch (dateStrategy) {
+    case 'yesterday':
+      numberOfDays = 1;
+      break;
+
+    case 'last_7_days':
+      numberOfDays = 7;
+      break;
+
+    case 'last_30_days':
+      numberOfDays = 30;
+      break;
+
+    case 'fixed':
+      throw new Error(
+        'Fixed date strategy requires configured start and end dates.'
+      );
+
+    default:
+      throw new Error(
+        'Unsupported date strategy: ' + dateStrategy
+      );
+  }
+
+  // Calculate the beginning of the selected date range
+  const startDate = new Date(endDate);
+  startDate.setUTCDate(
+    startDate.getUTCDate() - (numberOfDays - 1)
+  );
+
+  return {
+    startDate: startDate.toISOString().slice(0, 10),
+    endDate: endDate.toISOString().slice(0, 10)
+  };
 }
 
 async function downloadReport(reportId, startDate, endDate) {
   // Run the Playwright script with the selected report and date range
   const { stdout, stderr } = await execFileAsync(
     process.execPath,
-    [PLAYWRIGHT_SCRIPT, startDate, endDate, reportId],
+    [PLAYWRIGHT_SCRIPT, startDate, endDate, reportId, 'scheduled'],
     {
       cwd: PLAYWRIGHT_DIR,
       timeout: 10 * 60 * 1000,
@@ -94,7 +133,9 @@ async function runScheduledReport(config) {
     // Create a run record before starting the download
     run = await startRun('scheduled');
 
-    const yesterday = getYesterdayDate();
+    const { startDate, endDate } = getDateRange(
+    config.date_strategy || 'yesterday'
+    );
 
     await logger.info(
       run.id,
@@ -102,7 +143,7 @@ async function runScheduledReport(config) {
     );
 
     // Download the CSV using Playwright
-    await downloadReport(reportId, yesterday, yesterday);
+    await downloadReport(reportId, startDate, endDate);
 
     // Import the downloaded CSV using the same run ID
     await runFullImport('scheduled', reportId, run.id);
@@ -138,6 +179,12 @@ async function runScheduledReport(config) {
 
 async function initializeScheduler() {
   try {
+      // Stop previously registered jobs before loading updated settings
+      for (const job of scheduledJobs) {
+        job.stop();
+      }
+
+      scheduledJobs.length = 0;
     // Fetch all active report configurations
     const result = await query(
       'SELECT * FROM report_configs WHERE is_active = true'
@@ -168,26 +215,27 @@ async function initializeScheduler() {
 
     // Register one cron job for each unique schedule
     for (const [schedule, configs] of Object.entries(scheduleGroups)) {
-      cron.schedule(schedule, async () => {
-  if (isSchedulerRunning) {
-    console.log('Previous scheduled batch is still running. Skipping.');
-    return;
-  }
-  isSchedulerRunning = true;
-  try {
-    console.log('Scheduled reports started:', schedule);
-    // Process reports sequentially
-    for (const config of configs) {
-      await runScheduledReport(config);
-    }
-  } finally {
-    isSchedulerRunning = false;
-  }
-    }, {
-    timezone: TIMEZONE
-    });
-      console.log('Registered schedule:', schedule);
-    }
+      const job = cron.schedule(schedule, async () => {
+        if (isSchedulerRunning) {
+        console.log('Previous scheduled batch is still running. Skipping.');
+        return;
+      }
+      isSchedulerRunning = true;
+      try {
+        console.log('Scheduled reports started:', schedule);
+        // Process reports sequentially
+        for (const config of configs) {
+          await runScheduledReport(config);
+        }
+      } finally {
+        isSchedulerRunning = false;
+      }
+        }, {
+        timezone: TIMEZONE
+        });
+          scheduledJobs.push(job);
+          console.log('Registered schedule:', schedule);
+        }
 
     console.log('Scheduler initialized successfully');
 

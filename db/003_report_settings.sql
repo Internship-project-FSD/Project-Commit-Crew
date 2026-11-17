@@ -1,0 +1,4 @@
+ALTER TABLE report_configs
+ADD COLUMN IF NOT EXISTS download_folder VARCHAR(500),
+ADD COLUMN IF NOT EXISTS date_strategy VARCHAR(50) NOT NULL DEFAULT 'yesterday',
+ADD COLUMN IF NOT EXISTS report_path VARCHAR(255);
