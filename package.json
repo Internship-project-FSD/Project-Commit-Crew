@@ -1,0 +1,29 @@
+{
+  "name": "dms-report-automation",
+  "version": "1.1.0",
+  "description": "DMS report automation project with PostgreSQL-backed processing and Jest test suites",
+  "private": true,
+  "scripts": {
+    "test": "npm run test:core && npm run test:jest",
+    "test:jest": "npm --prefix Testing/jest test",
+    "test:unit": "npm --prefix Testing/jest run test:unit",
+    "test:integration": "npm --prefix Testing/jest run test:integration",
+    "test:api": "npm --prefix Testing/jest run test:api",
+    "test:e2e": "npm --prefix Testing/jest run test:e2e",
+    "test:coverage": "npm --prefix Testing/jest run test:coverage",
+    "test:all": "npm run test:core && npm --prefix Testing/jest run test:all",
+    "test:core": "node --test Testing/core/*.test.mjs",
+    "test:setup:core": "npm --prefix automation/backend install",
+    "test:setup:jest": "npm --prefix Testing/jest install",
+    "test:setup": "npm run test:setup:core && npm run test:setup:jest",
+    "pretest:core": "node Testing/scripts/check-core-deps.cjs"
+  },
+  "keywords": [
+    "dms-automation",
+    "playwright",
+    "postgresql",
+    "jest",
+    "srs-testing"
+  ],
+  "license": "ISC"
+}

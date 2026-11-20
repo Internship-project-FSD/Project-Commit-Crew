@@ -50,6 +50,7 @@ export default function ReportFilters({
           <option value="duplicates">Duplicate rows</option>
           <option value="empty">Empty results</option>
           <option value="bad-columns">Incorrect columns</option>
+          <option value="timeout">Simulated download timeout</option>
         </select>
       </div>
 

@@ -1,277 +1,287 @@
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import * as db from '../config/db.js';
 import { computeFileHash } from './hashService.js';
 import { validateCsvFile } from './csvValidator.js';
 import { createFileRecord, updateFileStatus, isFileAlreadyProcessed } from './fileService.js';
 import { startRun, endRun } from './runService.js';
 import * as logger from './logService.js';
+import {
+  assertSafeIdentifier, mapCsvRows, buildBulkInsert, selectReportConfigs,
+  calculateRunStatus, stableUniqueKeyHash,
+} from './importHelpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// Resolve the incoming folder configured for each report
-// Resolve the incoming folder configured for each report
-function getIncomingDir(downloadFolder) {
-  const downloadsRoot = path.resolve(
-    __dirname,
-    '../../../../downloads'
-  );
+const DOWNLOADS_ROOT = path.resolve(__dirname, '../../../../downloads');
+const PROCESSED_DIR = path.join(DOWNLOADS_ROOT, 'processed');
+const FAILED_DIR = path.join(DOWNLOADS_ROOT, 'failed');
+const TYPED_REPORTS = new Set(['vehicle_sales', 'service_transactions', 'spare_parts', 'insurance_renewals']);
+const DEFAULT_SERVICES = { db, computeFileHash, validateCsvFile, createFileRecord, updateFileStatus, isFileAlreadyProcessed, logger };
 
-  // Support both "downloads/incoming" and "incoming"
-  const relativeFolder = downloadFolder.replace(
-    /^downloads[\\/]/,
-    ''
-  );
-
-  const incomingDir = path.resolve(
-    downloadsRoot,
-    relativeFolder
-  );
-
-  // Prevent configured paths from escaping the downloads directory
-  if (
-    incomingDir === downloadsRoot ||
-    !incomingDir.startsWith(downloadsRoot + path.sep)
-  ) {
+function getIncomingDir(downloadFolder = 'downloads/incoming') {
+  if (typeof downloadFolder !== 'string' || !downloadFolder.trim()) throw new Error('Invalid download folder path');
+  const relativeFolder = downloadFolder.replace(/^downloads[\\/]/i, '');
+  const incomingDir = path.resolve(DOWNLOADS_ROOT, relativeFolder);
+  if (incomingDir === DOWNLOADS_ROOT || !incomingDir.startsWith(DOWNLOADS_ROOT + path.sep)) {
     throw new Error('Invalid download folder path');
   }
-
   return incomingDir;
 }
-const PROCESSED_DIR = path.join(__dirname, '../../../../downloads/processed');
-const FAILED_DIR = path.join(__dirname, '../../../../downloads/failed');
 
-
-// move a file from one folder to another
 function moveFile(from, toDir) {
+  fs.mkdirSync(toDir, { recursive: true });
+  const destination = path.join(toDir, path.basename(from));
   try {
-    const name = path.basename(from);
-    fs.renameSync(from, path.join(toDir, name));
-  } catch (err) {
-    console.error('Failed to move file:', err.message);
+    fs.renameSync(from, destination);
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    fs.copyFileSync(from, destination);
+    fs.unlinkSync(from);
   }
+  return destination;
 }
 
-
-// process one csv file: validate it, insert into staging, then final table
-async function processFile(runId, filePath, reportConfig) {
-  const fileName = path.basename(filePath);
-  await logger.info(runId, 'Processing file: ' + fileName);
-
-  // step 1: compute hash and check for duplicate
-  const fileHash = await computeFileHash(filePath);
-
- const alreadyDone = await isFileAlreadyProcessed(fileHash);
-
-if (alreadyDone) {
-  await logger.warn(runId, 'Duplicate file skipped: ' + fileName);
-
-  moveFile(filePath, PROCESSED_DIR);
-
-  return {
-    status: 'duplicate',
-    totalRows: 0,
-    importedRows: 0,
-    rejectedRows: 0
-  };
-}
-
-  // step 2: create a record in the files table
-  const fileRecord = await createFileRecord(runId, reportConfig.id, fileName, fileHash);
-  await updateFileStatus(fileRecord.id, 'processing');
-
-  // step 3: validate the csv
-  const validation = validateCsvFile(filePath, reportConfig);
-
-  if (!validation.isValid) {
-    await updateFileStatus(fileRecord.id, 'failed', {}, validation.fileError);
-    await logger.error(runId, 'Validation failed: ' + validation.fileError);
-    moveFile(filePath, FAILED_DIR);
-    return { status: 'failed', totalRows: 0, importedRows: 0, rejectedRows: 0 };
-  }
-
-  // step 4: insert valid rows into staging table, then copy to final table
+function assertReportConfig(reportConfig) {
+  if (!reportConfig || !Number.isInteger(Number(reportConfig.id))) throw new Error('Invalid report configuration');
+  const reportName = assertSafeIdentifier(reportConfig.report_name, 'report name');
   const columnMapping = reportConfig.column_mapping;
-  const stagingTable = 'stg_' + reportConfig.report_name;
-  const finalTable = reportConfig.report_name;
-  const uniqueKey = reportConfig.unique_key;
+  if (!columnMapping || typeof columnMapping !== 'object' || Array.isArray(columnMapping) || !Object.keys(columnMapping).length) {
+    throw new Error('Report column mapping is required');
+  }
+  Object.values(columnMapping).forEach((column) => assertSafeIdentifier(column, 'database column'));
+  if (!Array.isArray(reportConfig.unique_key) || reportConfig.unique_key.length === 0) {
+    throw new Error('Report unique key must contain at least one column');
+  }
+  reportConfig.unique_key.forEach((key) => {
+    if (!Object.hasOwn(columnMapping, key)) throw new Error(`Unique key ${key} is not present in column mapping`);
+  });
+  return { reportName, columnMapping };
+}
 
-  const client = await db.getClient();
+function getGenericRows(validation, reportConfig, fileId, runId) {
+  return validation.validRows.map((row) => ({
+    file_id: fileId,
+    run_id: runId,
+    report_config_id: Number(reportConfig.id),
+    row_data: JSON.stringify(row),
+  }));
+}
+
+async function persistRows(client, validation, reportConfig, fileRecord, runId, reportName, columnMapping) {
   let importedRows = 0;
+  let skippedRows = 0;
+  const uniqueColumns = reportConfig.unique_key.map((key) => columnMapping[key]);
 
-  try {
-    await client.query('BEGIN');
-
-    // insert each valid row into the staging table
-    for (const row of validation.validRows) {
-      // convert csv column names to database column names
-      const dbRow = {};
-      for (const [csvCol, dbCol] of Object.entries(columnMapping)) {
-        dbRow[dbCol] = row[csvCol] || null;
-      }
-      dbRow.file_id = fileRecord.id;
-
-      // build the INSERT query
-      const columns = Object.keys(dbRow);
-      const values = Object.values(dbRow);
-      const placeholders = values.map((_, i) => '$' + (i + 1));
-
-      await client.query(
-        'INSERT INTO ' + stagingTable + ' (' + columns.join(',') + ') VALUES (' + placeholders.join(',') + ')',
-        values
-      );
+  if (TYPED_REPORTS.has(reportName)) {
+    const stagingTable = assertSafeIdentifier(`stg_${reportName}`, 'staging table');
+    const finalTable = assertSafeIdentifier(reportName, 'final table');
+    const mappedRows = mapCsvRows(validation.validRows, columnMapping, fileRecord.id, runId);
+    for (const statement of buildBulkInsert(stagingTable, mappedRows, 200)) {
+      await client.query(statement.text, statement.values);
     }
 
-    // copy from staging to final table (skip duplicates)
-    const uniqueCols = uniqueKey.map(k => columnMapping[k]);
-    const allCols = Object.values(columnMapping);
-    const colList = ['file_id', ...allCols].join(',');
-
-    await client.query(
-      'INSERT INTO ' + finalTable + ' (' + colList + ') ' +
-      'SELECT ' + colList + ' FROM ' + stagingTable + ' WHERE file_id = $1 ' +
-      'ON CONFLICT (' + uniqueCols.join(',') + ') DO NOTHING',
-      [fileRecord.id]
-    );
-
-    // count how many rows actually made it to the final table
-    const countResult = await client.query(
-      'SELECT COUNT(*) as cnt FROM ' + finalTable + ' WHERE file_id = $1',
-      [fileRecord.id]
-    );
-    importedRows = parseInt(countResult.rows[0].cnt);
-
-    await client.query('COMMIT');
-
-  } catch (err) {
-    await client.query('ROLLBACK');
-    await updateFileStatus(fileRecord.id, 'failed', {}, err.message);
-    await logger.error(runId, 'Import failed: ' + err.message);
-    moveFile(filePath, FAILED_DIR);
-    return { status: 'failed', totalRows: validation.totalRows, importedRows: 0, rejectedRows: 0 };
-
-  } finally {
-    client.release();
+    if (mappedRows.length) {
+      const finalColumns = ['file_id', 'run_id', ...Object.values(columnMapping)];
+      const insertResult = await client.query(
+        `INSERT INTO ${finalTable} (${finalColumns.join(', ')})
+         SELECT ${finalColumns.join(', ')} FROM ${stagingTable} WHERE file_id = $1
+         ON CONFLICT (${uniqueColumns.join(', ')}) DO NOTHING RETURNING id`,
+        [fileRecord.id]
+      );
+      importedRows = Number(insertResult.rowCount || insertResult.rows?.length || 0);
+    }
+    skippedRows = Math.max(0, mappedRows.length - importedRows);
+  } else {
+    // New report types use a generic JSONB staging/final table. This lets an Admin
+    // add a report_config row without creating new PostgreSQL tables or code paths.
+    const reportNameSafe = assertSafeIdentifier(reportName, 'report name');
+    const genericRows = getGenericRows(validation, reportConfig, fileRecord.id, runId);
+    for (const statement of buildBulkInsert('stg_report_records', genericRows, 200)) {
+      await client.query(statement.text, statement.values);
+    }
+    const finalRows = validation.validRows.map((row) => ({
+      file_id: fileRecord.id,
+      run_id: runId,
+      report_config_id: Number(reportConfig.id),
+      unique_key_hash: stableUniqueKeyHash(row, reportConfig.unique_key, createHash),
+      record_data: JSON.stringify(row),
+    }));
+    for (const statement of buildBulkInsert('report_records', finalRows, 200)) {
+      const insertResult = await client.query(
+        `${statement.text.replace(/^INSERT INTO report_records/, 'INSERT INTO report_records')}
+         ON CONFLICT (report_config_id, unique_key_hash) DO NOTHING RETURNING id`,
+        statement.values
+      );
+      importedRows += Number(insertResult.rowCount || insertResult.rows?.length || 0);
+    }
+    skippedRows = Math.max(0, validation.validRows.length - importedRows);
+    await logger.info(runId, `Imported configuration-driven report ${reportNameSafe} through generic records table`);
   }
 
-  // step 5: save rejected rows to the database
   for (const rejected of validation.rejectedRows) {
-    await db.query(
-      'INSERT INTO rejected_rows (file_id, row_number, row_data, rejection_reason) VALUES ($1, $2, $3, $4)',
+    await client.query(
+      `INSERT INTO rejected_rows (file_id, row_number, row_data, rejection_reason)
+       VALUES ($1, $2, $3::jsonb, $4)`,
       [fileRecord.id, rejected.rowNumber, JSON.stringify(rejected.data), rejected.reason]
     );
   }
 
-  // step 6: update file status and move to processed folder
+  return { importedRows, skippedRows };
+}
+
+/** Process one CSV file. The optional services seam allows deterministic tests of this production path. */
+async function processFile(runId, filePath, reportConfig, options = {}) {
+  const services = { ...DEFAULT_SERVICES, ...(options.services || {}) };
+  const fileName = path.basename(filePath);
+  let fileRecord;
+  let client;
+
+  try {
+    if (!fs.existsSync(filePath)) throw new Error(`File does not exist: ${fileName}`);
+    await services.logger.info(runId, `Processing file: ${fileName}`);
+    const { reportName, columnMapping } = assertReportConfig(reportConfig);
+    const fileHash = await services.computeFileHash(filePath);
+    const alreadyProcessed = await services.isFileAlreadyProcessed(fileHash);
+    const stat = fs.statSync(filePath);
+    const metadata = { filePath: path.resolve(filePath), fileSize: stat.size, downloadedAt: stat.mtime };
+
+    if (alreadyProcessed && !options.forceReprocess) {
+      fileRecord = await services.createFileRecord(runId, reportConfig.id, fileName, fileHash, metadata);
+      await services.updateFileStatus(fileRecord.id, 'duplicate', { skippedRows: 0 });
+      await services.logger.warn(runId, `Duplicate file skipped: ${fileName}`, { fileHash, fileId: fileRecord.id });
+      moveFile(filePath, PROCESSED_DIR);
+      return { status: 'duplicate', totalRows: 0, importedRows: 0, skippedRows: 0, rejectedRows: 0 };
+    }
+
+    fileRecord = await services.createFileRecord(runId, reportConfig.id, fileName, fileHash, metadata);
+    await services.updateFileStatus(fileRecord.id, 'processing');
+    const validation = services.validateCsvFile(filePath, reportConfig);
+
+    if (!validation.isValid) {
+      await services.updateFileStatus(fileRecord.id, 'failed', {}, validation.fileError);
+      await services.logger.error(runId, `Validation failed: ${validation.fileError}`, { fileId: fileRecord.id, fileName });
+      moveFile(filePath, FAILED_DIR);
+      return { status: 'failed', totalRows: validation.totalRows || 0, importedRows: 0, skippedRows: 0, rejectedRows: 0, error: validation.fileError };
+    }
+
+    client = await services.db.getClient();
+    let importedRows = 0;
+    let skippedRows = 0;
+    await client.query('BEGIN');
+    try {
+      ({ importedRows, skippedRows } = await persistRows(client, validation, reportConfig, fileRecord, runId, reportName, columnMapping));
+      await client.query(
+        `UPDATE files SET status = 'success', total_rows = $1, imported_rows = $2,
+         skipped_rows = $3, rejected_rows = $4, error_message = NULL, processed_at = NOW()
+         WHERE id = $5`,
+        [validation.totalRows, importedRows, skippedRows, validation.rejectedRows.length, fileRecord.id]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      try { await client.query('ROLLBACK'); }
+      catch (rollbackError) { await services.logger.error(runId, `Rollback failed: ${rollbackError.message}`); }
+      throw error;
+    } finally {
+      client.release();
+      client = null;
+    }
+
+    for (const rejected of validation.rejectedRows) {
+      await services.logger.warn(runId, `Row ${rejected.rowNumber} rejected: ${rejected.reason}`, {
+        fileId: fileRecord.id, fileName, rowNumber: rejected.rowNumber, reason: rejected.reason,
+      });
+    }
+    const stats = { totalRows: validation.totalRows, importedRows, skippedRows, rejectedRows: validation.rejectedRows.length };
+    await services.logger.info(runId, `Done: ${importedRows} imported, ${skippedRows} skipped, ${stats.rejectedRows} rejected`);
+    moveFile(filePath, PROCESSED_DIR);
+    return { status: 'success', ...stats };
+  } catch (error) {
+    if (client) client.release();
+    if (fileRecord?.id) {
+      try { await services.updateFileStatus(fileRecord.id, 'failed', {}, error.message); } catch {}
+    }
+    await services.logger.error(runId, `File processing failed: ${error.message}`, { fileId: fileRecord?.id || null, fileName });
+    if (fs.existsSync(filePath)) {
+      try { moveFile(filePath, FAILED_DIR); } catch (moveError) {
+        await services.logger.error(runId, `Could not move failed file ${fileName}: ${moveError.message}`);
+      }
+    }
+    return { status: 'failed', totalRows: 0, importedRows: 0, skippedRows: 0, rejectedRows: 0, error: error.message };
+  }
+}
+
+async function runFullImport(triggerType, reportId = 'all', existingRunId = null, options = {}) {
+  const injected = options.services || {};
+  const runLogger = injected.logger || logger;
+  const queryDb = injected.db || db;
+  const beginRun = injected.startRun || startRun;
+  const finishRun = injected.endRun || endRun;
+  const processOneFile = injected.processFile || processFile;
+  const knownDownloadFailures = new Set((options.downloadFailedReports || []).map(String));
+  const run = existingRunId ? { id: existingRunId } : await beginRun(triggerType);
+  await runLogger.info(run.id, 'Import run started');
+  const configsResult = await queryDb.query('SELECT * FROM report_configs WHERE is_active = true ORDER BY id');
+  const selectedConfigs = selectReportConfigs(configsResult.rows, reportId);
+  if (!selectedConfigs.length) throw new Error('No active report configurations are available.');
+
   const stats = {
-    totalRows: validation.totalRows,
-    importedRows: importedRows,
-    rejectedRows: validation.rejectedRows.length
-  };
-
-  await updateFileStatus(fileRecord.id, 'success', stats);
-  await logger.info(runId, 'Done: ' + importedRows + ' imported, ' + stats.rejectedRows + ' rejected');
-  moveFile(filePath, PROCESSED_DIR);
-
-  return { status: 'success', ...stats };
-}
-
-
-// run the full import for all report types
-async function runFullImport(triggerType, reportId = 'all', existingRunId = null) {
-  const run = existingRunId
-    ? { id: existingRunId }
-    : await startRun(triggerType);
-  await logger.info(run.id, 'Import run started');
-
-  // get active report configs from the database
-const configsResult = await db.query(
-  'SELECT * FROM report_configs WHERE is_active = true'
-);
-
-// map dashboard report IDs to database report names
-const reportNameMap = {
-  'vehicle-sales-purchases': 'vehicle_sales',
-  'service-transactions': 'service_transactions',
-  'spare-parts-sales-purchases': 'spare_parts',
-  'insurance-renewals': 'insurance_renewals'
-};
-
-// select only the requested report, or all reports
-const selectedReportName = reportId === 'all'
-  ? null
-  : reportNameMap[reportId];
-
-if (reportId !== 'all' && !selectedReportName) {
-  throw new Error('Invalid report ID: ' + reportId);
-}
-
-const selectedConfigs = reportId === 'all'
-  ? configsResult.rows
-  : configsResult.rows.filter(
-      config => config.report_name === selectedReportName
-    );
-
-if (selectedConfigs.length === 0) {
-  throw new Error('No active report configuration found for: ' + reportId);
-}
-  const stats = {
-    totalFiles: 0,
+    totalFiles: Number(options.downloadFailures || 0),
     successFiles: 0,
-    failedFiles: 0,
+    failedFiles: Number(options.downloadFailures || 0),
     duplicateFiles: 0,
     totalRows: 0,
     importedRows: 0,
-    rejectedRows: 0
+    skippedRows: 0,
+    rejectedRows: 0,
   };
 
-  // go through each report type
   for (const config of selectedConfigs) {
-
-    // Get the incoming folder configured for this report
-const incomingDir = getIncomingDir(
-  config.download_folder || 'downloads/incoming'
-);
-
-// Create the folder if it does not exist
-if (!fs.existsSync(incomingDir)) {
-  fs.mkdirSync(incomingDir, { recursive: true });
-}
-
-// Find CSV files matching this report type
-const csvFiles = fs.readdirSync(incomingDir).filter(f =>
-  f.startsWith(config.report_name) && f.endsWith('.csv')
-);
-
-    // process each file
-    for (const file of csvFiles) {
-      stats.totalFiles++;
-      const filePath = path.join(incomingDir, file);
-      const result = await processFile(run.id, filePath, config);
-
-        if (result.status === 'success') {
-        stats.successFiles++;
-      } else if (result.status === 'duplicate') {
-        stats.duplicateFiles++;
-      } else {
-        stats.failedFiles++;
+    try {
+      const incomingDir = getIncomingDir(config.download_folder || 'downloads/incoming');
+      fs.mkdirSync(incomingDir, { recursive: true });
+      const csvFiles = fs.readdirSync(incomingDir)
+        .filter((name) => name.startsWith(`${config.report_name}_`) && name.toLowerCase().endsWith('.csv'))
+        .sort();
+      if (csvFiles.length === 0) {
+        const isKnownFailure = knownDownloadFailures.has(String(config.portal_path || '')) ||
+          knownDownloadFailures.has(String(config.report_name || ''));
+        if (!isKnownFailure) {
+          stats.totalFiles += 1;
+          stats.failedFiles += 1;
+          await runLogger.error(run.id, `No downloaded CSV file found for report: ${config.report_name}`);
+        }
       }
-      stats.totalRows += result.totalRows;
-      stats.importedRows += result.importedRows;
-      stats.rejectedRows += result.rejectedRows;
+      for (const file of csvFiles) {
+        stats.totalFiles += 1;
+        let result;
+        try {
+          result = await processOneFile(run.id, path.join(incomingDir, file), config, options);
+        } catch (error) {
+          result = { status: 'failed', totalRows: 0, importedRows: 0, skippedRows: 0, rejectedRows: 0, error: error.message };
+          await runLogger.error(run.id, `Report file ${file} failed: ${error.message}`);
+        }
+        if (result.status === 'success') stats.successFiles += 1;
+        else if (result.status === 'duplicate') { stats.duplicateFiles += 1; stats.successFiles += 1; }
+        else stats.failedFiles += 1;
+        stats.totalRows += result.totalRows || 0;
+        stats.importedRows += result.importedRows || 0;
+        stats.skippedRows += result.skippedRows || 0;
+        stats.rejectedRows += result.rejectedRows || 0;
+      }
+    } catch (error) {
+      stats.failedFiles += 1;
+      stats.totalFiles += 1;
+      await runLogger.error(run.id, `Report ${config.report_name} could not be processed: ${error.message}`);
     }
   }
 
-  // decide the final run status
-  let runStatus = 'success';
-  if (stats.failedFiles > 0 && stats.successFiles > 0) runStatus = 'partial';
-  else if (stats.failedFiles > 0 && stats.successFiles === 0) runStatus = 'failed';
-
-  await endRun(run.id, runStatus, stats);
-  await logger.info(run.id, 'Run finished: ' + runStatus);
-
-  return { runId: run.id, status: runStatus, ...stats };
+  const status = calculateRunStatus(stats);
+  await finishRun(run.id, status, stats);
+  await runLogger.info(run.id, `Run finished: ${status}`);
+  return { runId: run.id, status, ...stats };
 }
 
-export { processFile, runFullImport };
+export { processFile, runFullImport, getIncomingDir, moveFile, assertReportConfig, persistRows };

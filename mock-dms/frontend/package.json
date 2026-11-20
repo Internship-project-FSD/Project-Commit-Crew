@@ -1,12 +1,10 @@
 {
-  "name": "frontend",
+  "name": "mock-dms-frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node mock-dms-login.js",
-    "dev": "nodemon mock-dms-login.js",
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"

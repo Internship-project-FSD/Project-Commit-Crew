@@ -1,0 +1,4 @@
+PolicyNo,CustomerName,VehicleRegNo,VehicleModel,Insurer,PremiumAmount,PolicyStart,PolicyEnd,RenewalStatus
+POL-2024-001,Ravi Kumar,KL-01-AB-1234,Swift Dzire,HDFC Ergo,12500,2024-01-01,2025-01-01,Renewed
+POL-2024-002,Priya Sharma,KL-02-CD-5678,Alto K10,LIC,8500,2024-02-01,2025-02-01,Pending
+POL-2024-003,Suresh Babu,KL-03-EF-9012,Baleno,ICICI Lombard,15000,2024-03-01,2025-03-01,Renewed

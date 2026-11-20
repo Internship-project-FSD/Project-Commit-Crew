@@ -15,7 +15,7 @@ export default function Sidebar({ active, onNavigate, user }) {
       </div>
       <div className="workspace-switcher">
         <div className="workspace-icon">KD</div>
-        <div className="workspace-copy"><span>Dealership workspace</span><strong>Kerala Demo Motors</strong></div>
+        <div className="workspace-copy"><span>Dealership workspace</span><strong>Mock DMS</strong></div>
         <span className="workspace-dot" />
       </div>
       <div className="side-label">WORKSPACE</div>

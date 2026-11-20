@@ -275,12 +275,14 @@ function getReportData(reportId, query) {
     'missing',
     'duplicates',
     'empty',
-    'bad-columns'
+    'bad-columns',
+    'timeout'
   ];
 
   if (!allowedScenarios.includes(scenario)) {
     return { status: 400, error: 'Invalid test scenario.' };
   }
+  if (scenario === 'timeout') return { status: 504, error: 'Simulated report download timeout.' };
 
   const rows = buildRows(report, startDate, endDate);
   const data = applyScenario(rows, report.columns, scenario);
@@ -293,4 +295,119 @@ function getReportData(reportId, query) {
   };
 }
 
-module.exports = {reports, getReportData};
+
+function validDateRange(query) {
+  const { startDate, endDate } = query || {};
+  if (!isValidDate(startDate) || !isValidDate(endDate)) {
+    return { error: 'Provide valid start and end dates in YYYY-MM-DD format.', status: 400 };
+  }
+  if (startDate > endDate) return { error: 'Start date must be on or before end date.', status: 400 };
+  return null;
+}
+
+function createConfiguredRow(config, columns, index, startDate, endDate) {
+  const start = new Date(`${startDate}T00:00:00.000Z`);
+  const end = new Date(`${endDate}T00:00:00.000Z`);
+  const dayCount = Math.max(1, Math.floor((end - start) / 86400000) + 1);
+  const rowDate = new Date(start);
+  rowDate.setUTCDate(rowDate.getUTCDate() + (index % dayCount));
+  const isoDate = formatDate(rowDate);
+  const uniqueKeys = Array.isArray(config.unique_key) ? config.unique_key : [];
+  const reportCode = String(config.report_name || 'CUSTOM').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+  const row = {};
+
+  for (const column of columns) {
+    const lower = String(column).toLowerCase();
+    if (uniqueKeys.includes(column)) {
+      row[column] = `${reportCode}-${String(index + 1).padStart(6, '0')}`;
+    } else if (/date|_at$|^start|^end|expiry|renewal/.test(lower)) {
+      row[column] = isoDate;
+    } else if (/quantity|qty|count|units|odometer|mileage|kilometer|distance/.test(lower)) {
+      row[column] = (index % 20) + 1;
+    } else if (/amount|price|premium|tax|cost|rate|total|value/.test(lower)) {
+      row[column] = Number((500 + ((index + 1) * 37.25) % 25000).toFixed(2));
+    } else if (/status/.test(lower)) {
+      row[column] = index % 5 === 0 ? 'PENDING' : 'COMPLETED';
+    } else if (/email/.test(lower)) {
+      row[column] = `synthetic.user.${index + 1}@example.invalid`;
+    } else if (/phone|mobile/.test(lower)) {
+      row[column] = `900000${String(index + 1).padStart(4, '0')}`;
+    } else {
+      row[column] = `Synthetic ${column} ${index + 1}`;
+    }
+  }
+  return row;
+}
+
+function applyConfiguredScenario(rows, columns, scenario) {
+  if (scenario === 'empty') return { rows: [], columns };
+  if (scenario === 'missing') {
+    const changed = rows.map((row) => ({ ...row }));
+    if (changed.length) changed[0][columns[0]] = '';
+    if (changed.length > 1 && columns.length > 1) changed[1][columns[1]] = '';
+    return { rows: changed, columns };
+  }
+  if (scenario === 'duplicates') return { rows: rows.length ? [...rows, { ...rows[0] }] : rows, columns };
+  if (scenario === 'bad-columns') {
+    return {
+      rows: rows.map((row, index) => ({ unexpected_id: `BAD-${index + 1}`, unexpected_value: row[columns[0]] ?? '' })),
+      columns: ['unexpected_id', 'unexpected_value'],
+    };
+  }
+  return { rows, columns };
+}
+
+async function listConfiguredReports() {
+  // Load lazily so unit tests can continue to exercise the deterministic static data
+  // without requiring a running PostgreSQL instance.
+  const { pool } = require('../config/database');
+  const result = await pool.query(
+    `SELECT id, report_name, portal_path, required_columns, unique_key, column_mapping
+     FROM report_configs WHERE is_active = true ORDER BY id`
+  );
+  if (!result.rows.length) return reports;
+  return result.rows.map((config) => ({
+    id: config.portal_path || config.report_name,
+    reportName: config.report_name,
+    name: String(config.report_name).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
+    columns: Array.isArray(config.required_columns) ? config.required_columns : [],
+    configId: config.id,
+  }));
+}
+
+async function getConfiguredReportData(reportId, query) {
+  const staticResult = getReportData(reportId, query);
+  if (staticResult.data || staticResult.status === 400) return staticResult;
+
+  const { pool } = require('../config/database');
+  const configResult = await pool.query(
+    `SELECT id, report_name, portal_path, required_columns, unique_key, column_mapping
+     FROM report_configs WHERE is_active = true AND (portal_path = $1 OR report_name = $1) LIMIT 1`,
+    [reportId]
+  );
+  const config = configResult.rows[0];
+  if (!config) return { status: 404, error: 'Report not found.' };
+
+  const rangeError = validDateRange(query);
+  if (rangeError) return rangeError;
+  const scenario = query?.scenario || 'normal';
+  const allowedScenarios = ['normal', 'missing', 'duplicates', 'empty', 'bad-columns', 'timeout'];
+  if (!allowedScenarios.includes(scenario)) return { status: 400, error: 'Invalid test scenario.' };
+  if (scenario === 'timeout') return { status: 504, error: 'Simulated report download timeout.' };
+
+  const columns = Array.isArray(config.required_columns) ? config.required_columns : [];
+  if (!columns.length) return { status: 500, error: 'The report configuration has no required columns.' };
+  const rows = Array.from({ length: 100 }, (_, index) => createConfiguredRow(config, columns, index, query.startDate, query.endDate));
+  const shaped = applyConfiguredScenario(rows, columns, scenario);
+  const report = {
+    id: config.portal_path || config.report_name,
+    reportName: config.report_name,
+    name: String(config.report_name).replaceAll('_', ' '),
+    columns: shaped.columns,
+    configId: config.id,
+  };
+  return { data: { report, ...shaped } };
+}
+
+module.exports = { reports, getReportData, listConfiguredReports, getConfiguredReportData, createConfiguredRow, applyConfiguredScenario };
+

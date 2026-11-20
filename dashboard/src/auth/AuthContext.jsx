@@ -1,47 +1,42 @@
-import { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { api } from '../api/client.js';
 
 const AuthContext = createContext(null);
 
-// Local demonstration identity only.
-// This is NOT authenticated or suitable for production access.
-const localUser = {
-  id: 'local-dashboard-admin',
-  name: 'Local Dashboard Admin',
-  email: 'local-admin@dms.local',
-  role: 'admin',
-};
-
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(localUser);
+  const [user, setUser] = useState(null);
+  const [checking, setChecking] = useState(true);
+  const [authError, setAuthError] = useState('');
 
-  // No authentication endpoint exists in the automation backend.
-  const checking = false;
-  const authError = '';
+  useEffect(() => {
+    let active = true;
+    api.me()
+      .then((response) => { if (active) setUser(response?.user || null); })
+      .catch(() => { if (active) setUser(null); })
+      .finally(() => { if (active) setChecking(false); });
+    return () => { active = false; };
+  }, []);
 
-  const login = useCallback(async () => {
-    setUser(localUser);
-    return localUser;
+  const login = useCallback(async (credentials) => {
+    setAuthError('');
+    const response = await api.login(credentials);
+    const authenticatedUser = response?.user;
+    if (!authenticatedUser || !['admin', 'manager'].includes(authenticatedUser.role)) {
+      throw new Error('The authentication service returned an invalid dashboard account.');
+    }
+    setUser(authenticatedUser);
+    return authenticatedUser;
   }, []);
 
   const logout = useCallback(async () => {
-    // Keep local access available for this unauthenticated demo.
-    setUser(localUser);
+    try { await api.logout(); }
+    finally { setUser(null); }
   }, []);
 
-  const setAuthError = useCallback(() => {}, []);
-
-  const value = useMemo(
-    () => ({
-      user,
-      login,
-      logout,
-      checking,
-      authError,
-      setAuthError,
-      isLocalAccessMode: true,
-    }),
-    [user, login, logout, checking, authError, setAuthError],
-  );
+  const value = useMemo(() => ({
+    user, login, logout, checking, authError, setAuthError,
+    isLocalAccessMode: false,
+  }), [user, login, logout, checking, authError]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

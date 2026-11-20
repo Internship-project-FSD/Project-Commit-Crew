@@ -1,0 +1,2 @@
+InvoiceNo,Date,Client,Model,Version,Colour,Chassis,Engine,Sale,Tax,Total,Payment,Staff
+INV-001,2024-01-15,Ravi Kumar,Swift Dzire,VXI,White,MA3FJED1S00123456,D13A1234567,750000,135000,885000,Finance,Arjun Nair

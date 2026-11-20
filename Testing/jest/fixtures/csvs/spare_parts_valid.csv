@@ -1,0 +1,4 @@
+PartNo,PartName,Category,Quantity,UnitPrice,TotalPrice,InvoiceNo,InvoiceDate,CustomerName
+SP-001-A,Air Filter,Filters,2,850,1700,SINV-001,2024-01-15,Ravi Kumar
+SP-002-B,Oil Filter,Filters,1,650,650,SINV-002,2024-01-16,Priya Sharma
+SP-003-C,Brake Pad Set,Brakes,4,1200,4800,SINV-003,2024-01-17,Suresh Babu

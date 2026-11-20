@@ -1,0 +1,45 @@
+{
+    "name":  "dms-jest-tests",
+    "version":  "1.1.0",
+    "description":  "Jest unit, integration, API and Playwright test suites for DMS Report Automation",
+    "type":  "commonjs",
+    "private":  true,
+    "scripts":  {
+                    "test":  "node run-jest.cjs all",
+                    "test:unit":  "node run-jest.cjs unit",
+                    "test:integration":  "node run-jest.cjs integration",
+                    "test:api":  "node run-jest.cjs api",
+                    "test:e2e":  "node run-jest.cjs e2e",
+                    "test:coverage":  "node run-jest.cjs coverage",
+                    "test:all":  "node run-jest.cjs full"
+                },
+    "jest":  {
+                 "rootDir":  ".",
+                 "testEnvironment":  "node",
+                 "testMatch":  [
+                                   "**/unit/**/*.test.js",
+                                   "**/integration/**/*.test.js",
+                                   "**/api/**/*.test.js",
+                                   "**/e2e/**/*.test.js",
+                                   "**/api/**/*.test.mjs"
+                               ],
+                 "transform":  {
+                                   "^.+\\.js$":  "babel-jest"
+                               },
+                 "transformIgnorePatterns":  [
+                                                 "/node_modules/(?!(csv-parse)/)"
+                                             ],
+                 "testTimeout":  30000,
+                 "verbose":  true,
+                 "forceExit":  true
+             },
+    "devDependencies":  {
+                            "@babel/core":  "^7.24.0",
+                            "@babel/preset-env":  "^7.24.0",
+                            "babel-jest":  "^29.7.0",
+                            "jest":  "^29.7.0",
+                            "supertest":  "^7.0.0",
+                            "dotenv":  "^16.4.5",
+                            "pg":  "^8.13.1"
+                        }
+}

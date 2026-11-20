@@ -1,0 +1,3 @@
+InvoiceNo,InvoiceDate,CustomerName,VehicleModel,Variant,Color,ChassisNo,EngineNo,SaleAmount,TaxAmount,TotalAmount,PaymentMode,Salesperson
+INV-DUP-001,2024-01-15,Ravi Kumar,Swift Dzire,VXI,White,MA3FJED1S00123456,D13A1234567,750000,135000,885000,Finance,Arjun Nair
+INV-DUP-001,2024-01-16,Priya Sharma,Alto K10,VXI,Red,MA3EHD31S00234567,K10B2345678,350000,63000,413000,Cash,Meena Pillai

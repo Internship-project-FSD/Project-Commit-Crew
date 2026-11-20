@@ -9,17 +9,34 @@ export const API_PATHS = {
   reports: env.VITE_REPORTS_PATH || '/api/reports',
   runs: env.VITE_RUNS_PATH || '/api/runs',
   health: env.VITE_HEALTH_PATH || '/health',
+  auth: env.VITE_AUTH_PATH || '/api/auth',
 };
 
 export const http = axios.create({
   baseURL: env.VITE_API_BASE_URL || 'http://localhost:3000',
   timeout: 20000,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
 export const api = {
+  async login(credentials) {
+    if (isDemoMode) return demoApi.login(credentials);
+    return (await http.post(`${API_PATHS.auth}/login`, credentials)).data;
+  },
+
+  async me() {
+    if (isDemoMode) return demoApi.me();
+    return (await http.get(`${API_PATHS.auth}/me`)).data;
+  },
+
+  async logout() {
+    if (isDemoMode) return demoApi.logout();
+    return (await http.post(`${API_PATHS.auth}/logout`)).data;
+  },
+
   async getHealth() {
     if (isDemoMode) return demoApi.getHealth();
     return (await http.get(API_PATHS.health)).data;

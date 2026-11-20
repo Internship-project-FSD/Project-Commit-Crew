@@ -1,0 +1,4 @@
+JobCardNo,JobCardDate,CustomerName,VehicleRegNo,VehicleModel,ServiceType,LabourAmount,PartsAmount,TotalAmount,ServiceAdvisor,Status
+JC-2024-001,2024-01-15,Ravi Kumar,KL-01-AB-1234,Swift Dzire,General Service,1500,2300,3800,Suresh M,Completed
+JC-2024-002,2024-01-16,Priya Sharma,KL-02-CD-5678,Alto K10,Oil Change,800,1200,2000,Arun K,Completed
+JC-2024-003,2024-01-17,Suresh Babu,KL-03-EF-9012,Baleno,AC Repair,3500,4500,8000,Meena R,In Progress
